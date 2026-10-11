@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAFB Neuron 1105156797 GPU Viewer</title>
+  <style>
+    :root { color-scheme: dark; --ink: #e9f2ee; --muted: #91aaa0; --panel: #10201d; --line: #29423a; --accent: #64e6a5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 70% 10%, #1b3930, #08110f 58%); color: var(--ink); font: 15px/1.45 Georgia, serif; }
+    main { width: min(1180px, 100%); margin: auto; padding: 28px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); font-weight: 400; letter-spacing: .02em; }
+    p { color: var(--muted); margin: 5px 0 0; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 16px; }
+    .stage, aside { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line); border-radius: 8px; }
+    .stage { position: relative; min-height: 620px; display: grid; place-items: center; padding: 18px; }
+    canvas { width: min(78vw, 640px); height: min(78vw, 640px); image-rendering: auto; background: #000; border-radius: 4px; box-shadow: 0 18px 50px #0008; }
+    #fps { position: fixed; z-index: 10; top: 12px; right: 12px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; background: #08110fcc; color: var(--accent); font: 12px monospace; }
+    aside { padding: 20px; align-self: start; }
+    label, legend { display: block; color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; margin: 18px 0 8px; }
+    button { width: 100%; margin: 4px 0; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: #142923; color: var(--ink); cursor: pointer; text-align: left; }
+    button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+    input { width: 100%; accent-color: var(--accent); }
+    #neurons { max-height: 190px; overflow-y: auto; padding: 6px; border: 1px solid var(--line); border-radius: 4px; background: #142923; }
+    #neurons label { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--ink); font: 12px monospace; letter-spacing: 0; text-transform: none; cursor: pointer; }
+    #neurons input { width: auto; margin: 0; }
+    output { color: var(--accent); float: right; }
+    #status { font-family: monospace; font-size: 12px; color: var(--muted); word-break: break-word; }
+    @media (max-width: 760px) { main { padding: 16px; } .layout { grid-template-columns: 1fr; } .stage { min-height: auto; } canvas { width: 92vw; height: 92vw; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>FAFB neurons</h1><p>Multi-select grayscale maximum-intensity rendering</p></div><div id="status">Loading neurons...</div></header>
+  <section class="layout">
+    <div class="stage"><canvas id="view" width="160" height="160"></canvas><div id="fps">FPS: --</div></div>
+    <aside>
+      <label>View axis</label>
+      <button data-axis="0" aria-pressed="true">Z axis</button>
+      <button data-axis="1" aria-pressed="false">Y axis</button>
+      <button data-axis="2" aria-pressed="false">X axis</button>
+      <label>Render mode</label>
+      <button data-mode="depth" aria-pressed="true">Depth composite</button>
+      <button data-mode="max" aria-pressed="false">Maximum intensity</button>
+      <label for="neurons">Neuron IDs</label>
+      <div id="neurons" aria-label="Neuron IDs"></div>
+      <label for="opacity">Opacity <output id="opacityValue">1.0</output></label>
+      <input id="opacity" type="range" min="0.1" max="3" step="0.1" value="1">
+      <label for="samples">Samples <output id="samplesValue">160</output></label>
+      <input id="samples" type="range" min="64" max="256" step="32" value="160">
+      <p id="statusDetail">Preparing neuron IDs for GPU rendering.</p>
+    </aside>
+  </section>
+</main>
+<script>
+const manifestUrl = 'adaptive_fam_models/chameleon_paper_faithful/manifest.json';
+const volumeUrl = 'fafb_neuron_labels_160.raw';
+const idsUrl = 'fafb_neuron_ids.json';
+const state = { volume: null, labels: null, neuronIds: [], samples: 160, axis: 0, mode: 'depth', opacity: 1, yaw: 0, pitch: 0, distance: 2.4, dragging: false, pointerX: 0, pointerY: 0 };
+window.__adaptiveFamState = state;
+const status = document.querySelector('#status');
+const detail = document.querySelector('#statusDetail');
+const canvas = document.querySelector('#view');
+const neuronSelect = document.querySelector('#neurons');
+const fpsElement = document.querySelector('#fps');
+let context = null;
+let gpu = null;
+let frameCount = 0;
+let fpsTimestamp = performance.now();
+
+function basis(parameters, knots, degree) {
+  const ncp = knots.length - degree - 1, values = Array.from({length: parameters.length}, () => new Float32Array(ncp));
+  for (let p = 0; p < parameters.length; p++) for (let i = 0; i < ncp; i++) values[p][i] = parameters[p] >= knots[i] && parameters[p] < knots[i + 1] ? 1 : 0;
+  for (let p = 0; p < parameters.length; p++) if (parameters[p] === knots[knots.length - 1]) values[p][ncp - 1] = 1;
+  for (let order = 1; order <= degree; order++) for (let p = 0; p < parameters.length; p++) {
+    const next = new Float32Array(ncp);
+    for (let i = 0; i < ncp; i++) {
+      const left = knots[i + order] - knots[i], right = knots[i + order + 1] - knots[i + 1];
+      if (left) next[i] += (parameters[p] - knots[i]) / left * values[p][i];
+      if (right && i + 1 < ncp) next[i] += (knots[i + order + 1] - parameters[p]) / right * values[p][i + 1];
+    }
+    values[p] = next;
+  }
+  return values;
+}
+
+async function decodeModel(url, coordinates) {
+  const buffer = await fetch(url).then(response => response.arrayBuffer());
+  const data = new DataView(buffer), degree = data.getUint32(0, true), knotSize = data.getUint32(4, true);
+  const knots = [0, 1, 2].map(axis => Array.from({length: knotSize}, (_, i) => data.getFloat32(8 + (axis * knotSize + i) * 4, true)));
+  const ncp = knotSize - degree - 1, controls = new Float32Array(buffer, 8 + knotSize * 3 * 4, ncp ** 3);
+  const bases = coordinates.map((axis, dimension) => basis(axis, knots[dimension], degree));
+  const output = new Float32Array(coordinates[0].length * coordinates[1].length * coordinates[2].length);
+  let out = 0;
+  for (let z = 0; z < coordinates[0].length; z++) for (let y = 0; y < coordinates[1].length; y++) for (let x = 0; x < coordinates[2].length; x++) {
+    let value = 0;
+    for (let a = 0; a < ncp; a++) for (let b = 0; b < ncp; b++) for (let c = 0; c < ncp; c++) value += bases[0][z][a] * bases[1][y][b] * bases[2][x][c] * controls[(a * ncp + b) * ncp + c];
+    output[out++] = value;
+  }
+  return output;
+}
+
+function transfer(value) {
+  const stops = [[0, [0, 0, 1]], [.5, [0, 1, 0]], [1, [1, 0, 0]]];
+  const alphaStops = [[0, 0], [.1, 0], [.11, .1], [.14, .1], [.15, 0], [.21, 0], [.22, .2], [.25, .2], [.26, 0], [.37, 0], [.38, .7], [.41, .7], [.42, 0], [.73, 0], [.74, 1], [1, 1]];
+  const interpolate = (list, channel) => { for (let i = 1; i < list.length; i++) if (value <= list[i][0]) { const t = (value - list[i - 1][0]) / (list[i][0] - list[i - 1][0]); return list[i - 1][channel] + t * (list[i][channel] - list[i - 1][channel]); } return list.at(-1)[channel]; };
+  return { color: stops[0][1].map((_, channel) => interpolate(stops.map(stop => [stop[0], stop[1][channel]]), 1)), alpha: interpolate(alphaStops, 1) };
+}
+
+function draw() {
+  if (!state.volume || (!gpu && !context)) return;
+  if (gpu) { gpu.render(); return; }
+  if (!context) context = canvas.getContext('2d');
+  const n = state.samples, volume = state.volume, image = context.createImageData(n, n), depthFirst = state.axis;
+  const shape = [n, n, n], rgb = new Float32Array(n * n * 3), opacity = new Float32Array(n * n);
+  for (let depth = 0; depth < n; depth++) for (let row = 0; row < n; row++) for (let col = 0; col < n; col++) {
+    const coordinates = [depth, row, col]; coordinates[depthFirst] = depth;
+    const index = (coordinates[0] * n + coordinates[1]) * n + coordinates[2], value = Math.max(0, Math.min(1, volume[index])), pixel = row * n + col;
+    if (state.mode === 'max') rgb[pixel * 3] = Math.max(rgb[pixel * 3], value);
+    else rgb[pixel * 3] += (1 - opacity[pixel]) * value * state.opacity;
+    rgb[pixel * 3 + 1] = rgb[pixel * 3];
+    rgb[pixel * 3 + 2] = rgb[pixel * 3];
+    opacity[pixel] = state.mode === 'max' ? rgb[pixel * 3] : Math.min(1, opacity[pixel] + (1 - opacity[pixel]) * value * state.opacity);
+  }
+  canvas.width = canvas.height = n;
+  for (let pixel = 0; pixel < n * n; pixel++) { image.data[pixel * 4] = Math.min(255, rgb[pixel * 3] * 255); image.data[pixel * 4 + 1] = Math.min(255, rgb[pixel * 3 + 1] * 255); image.data[pixel * 4 + 2] = Math.min(255, rgb[pixel * 3 + 2] * 255); image.data[pixel * 4 + 3] = 255; }
+  context.putImageData(image, 0, 0);
+}
+
+function animate(timestamp) {
+  if (gpu && state.volume) {
+    draw();
+    frameCount++;
+    if (timestamp - fpsTimestamp >= 500) {
+      fpsElement.textContent = `FPS: ${(frameCount * 1000 / (timestamp - fpsTimestamp)).toFixed(1)}`;
+      frameCount = 0;
+      fpsTimestamp = timestamp;
+    }
+  }
+  requestAnimationFrame(animate);
+}
+
+async function setupWebGPU() {
+  if (!navigator.gpu) {
+    detail.textContent = 'WebGPU unavailable; using CPU fallback.';
+    return;
+  }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('No WebGPU adapter available.');
+  const device = await adapter.requestDevice();
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context = canvas.getContext('webgpu');
+  context.configure({device, format, alphaMode: 'premultiplied'});
+  const n = state.samples, texture = device.createTexture({size: [n, n, n], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST});
+  const rgba = new Uint8Array(n ** 3 * 4);
+  for (let i = 0; i < n ** 3; i++) { const value = Math.max(0, Math.min(255, state.volume[i] * 255)); rgba[i * 4] = value; rgba[i * 4 + 1] = value; rgba[i * 4 + 2] = value; rgba[i * 4 + 3] = 255; }
+  device.queue.writeTexture({texture}, rgba, {bytesPerRow: n * 4, rowsPerImage: n}, [n, n, n]);
+  const uniform = device.createBuffer({size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+  const shader = device.createShaderModule({code: `
+    struct Params { yaw: f32, pitch: f32, opacity: f32, distance: f32 };
+    @group(0) @binding(0) var volume: texture_3d<f32>;
+    @group(0) @binding(1) var volumeSampler: sampler;
+    @group(0) @binding(2) var<uniform> params: Params;
+    struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f };
+    @vertex fn vertex(@builtin(vertex_index) index: u32) -> Out {
+      var positions = array<vec2f, 3>(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+      var out: Out; out.position = vec4f(positions[index], 0, 1); out.uv = positions[index] * .5 + .5; return out;
+    }
+    fn transfer(v: f32) -> vec3f { return vec3f(v); }
+    @fragment fn fragment(input: Out) -> @location(0) vec4f {
+      var color = vec3f(0); var opacity = 0.;
+      let maximum = params.distance < 0.;
+      let cameraDistance = abs(params.distance);
+      let camera = vec3f(cameraDistance * cos(params.pitch) * sin(params.yaw), cameraDistance * sin(params.pitch), cameraDistance * cos(params.pitch) * cos(params.yaw));
+      let target = vec3f(.5, .5, .5);
+      let forward = normalize(target - camera);
+      let right = normalize(cross(forward, vec3f(0, 1, 0)));
+      let up = cross(right, forward);
+      let direction = normalize(forward + right * (input.uv.x - .5) * 1.4 + up * (input.uv.y - .5) * 1.4);
+      let inverseDirection = 1. / direction;
+      let nearPoint = min((vec3f(0) - camera) * inverseDirection, (vec3f(1) - camera) * inverseDirection);
+      let farPoint = max((vec3f(0) - camera) * inverseDirection, (vec3f(1) - camera) * inverseDirection);
+      let nearDistance = max(max(nearPoint.x, nearPoint.y), nearPoint.z);
+      let farDistance = min(min(farPoint.x, farPoint.y), farPoint.z);
+      if (farDistance <= nearDistance) { return vec4f(0); }
+      for (var i: u32 = 0; i < 160; i++) {
+        let t = nearDistance + (f32(i) + .5) / 160. * (farDistance - nearDistance);
+        let coordinate = camera + direction * t;
+        let value = textureSampleLevel(volume, volumeSampler, coordinate, 0.).r;
+        if (maximum) { color = max(color, transfer(value)); }
+        else { let alpha = min(value * .12 * params.opacity, .35); color += (1. - opacity) * alpha * transfer(value); opacity += (1. - opacity) * alpha; }
+      }
+      return vec4f(color, 1);
+    }
+  `});
+  const pipeline = device.createRenderPipeline({layout: 'auto', vertex: {module: shader, entryPoint: 'vertex'}, fragment: {module: shader, entryPoint: 'fragment', targets: [{format}]}, primitive: {topology: 'triangle-list'}});
+  const bindGroup = device.createBindGroup({layout: pipeline.getBindGroupLayout(0), entries: [{binding: 0, resource: texture.createView()}, {binding: 1, resource: device.createSampler({magFilter: 'linear', minFilter: 'linear'})}, {binding: 2, resource: {buffer: uniform}}]});
+  gpu = {render() { device.queue.writeBuffer(uniform, 0, new Float32Array([state.yaw, state.pitch, state.opacity, state.mode === 'max' ? -state.distance : state.distance])); const encoder = device.createCommandEncoder(); const pass = encoder.beginRenderPass({colorAttachments: [{view: context.getCurrentTexture().createView(), clearValue: {r: 0, g: 0, b: 0, a: 1}, loadOp: 'clear', storeOp: 'store'}]}); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.draw(3); pass.end(); device.queue.submit([encoder.finish()]); }};
+  detail.textContent = `WebGPU active; loaded ${n}^3 samples on the GPU.`;
+}
+
+function setupWebGL() {
+  const gl = canvas.getContext('webgl2');
+  if (!gl) throw new Error('WebGL2 is unavailable.');
+  const vertexSource = `#version 300 es
+    void main() {
+      vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+      gl_Position = vec4(p, 0.0, 1.0);
+    }`;
+  const fragmentSource = `#version 300 es
+    precision highp float;
+    precision highp sampler3D;
+    uniform sampler3D volume;
+    uniform float yaw, pitch, opacity, distance, mode;
+    out vec4 colorOut;
+    vec3 transfer(float value) { return vec3(value); }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / vec2(${canvas.width}.0, ${canvas.height}.0);
+      vec3 camera = vec3(abs(distance) * cos(pitch) * sin(yaw), abs(distance) * sin(pitch), abs(distance) * cos(pitch) * cos(yaw));
+      vec3 forward = normalize(vec3(0.5) - camera);
+      vec3 right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+      vec3 up = cross(right, forward);
+      vec3 direction = normalize(forward + right * (uv.x - 0.5) * 1.4 + up * (uv.y - 0.5) * 1.4);
+      vec3 inverseDirection = 1.0 / direction;
+      vec3 nearPoint = min((vec3(0.0) - camera) * inverseDirection, (vec3(1.0) - camera) * inverseDirection);
+      vec3 farPoint = max((vec3(0.0) - camera) * inverseDirection, (vec3(1.0) - camera) * inverseDirection);
+      float nearDistance = max(max(nearPoint.x, nearPoint.y), nearPoint.z);
+      float farDistance = min(min(farPoint.x, farPoint.y), farPoint.z);
+      if (farDistance <= nearDistance) { colorOut = vec4(0.0); return; }
+      vec3 accumulated = vec3(0.0);
+      float accumulatedOpacity = 0.0;
+      for (int index = 0; index < 160; index++) {
+        float t = nearDistance + (float(index) + 0.5) / 160.0 * (farDistance - nearDistance);
+        vec3 coordinate = camera + direction * t;
+        float value = texture(volume, coordinate).r;
+        if (mode > 0.5) accumulated = max(accumulated, transfer(value));
+        else { float alpha = min(value * 0.12 * opacity, 0.35); accumulated += (1.0 - accumulatedOpacity) * alpha * transfer(value); accumulatedOpacity += (1.0 - accumulatedOpacity) * alpha; }
+      }
+      colorOut = vec4(accumulated, 1.0);
+    }`;
+  const compile = (type, source) => { const shader = gl.createShader(type); gl.shaderSource(shader, source); gl.compileShader(shader); if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader)); return shader; };
+  const program = gl.createProgram(); gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource)); gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource)); gl.linkProgram(program); if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  const texture = gl.createTexture(); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, texture); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  const bytes = new Uint8Array(state.volume.length); for (let i = 0; i < bytes.length; i++) bytes[i] = Math.max(0, Math.min(255, state.volume[i] * 255));
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, 160, 160, 160, 0, gl.RED, gl.UNSIGNED_BYTE, bytes); gl.useProgram(program); gl.uniform1i(gl.getUniformLocation(program, 'volume'), 0);
+  context = gl;
+  gpu = { render() { gl.viewport(0, 0, canvas.width, canvas.height); gl.useProgram(program); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), state.yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), state.pitch); gl.uniform1f(gl.getUniformLocation(program, 'opacity'), state.opacity); gl.uniform1f(gl.getUniformLocation(program, 'distance'), state.distance); gl.uniform1f(gl.getUniformLocation(program, 'mode'), state.mode === 'max' ? 1 : 0); gl.drawArrays(gl.TRIANGLES, 0, 3); } };
+  detail.textContent = `WebGL2 active; loaded ${state.volume.length.toLocaleString()} samples on the GPU.`;
+}
+
+async function setupGpu() {
+  try { await setupWebGPU(); }
+  catch (webgpuError) {
+    try { setupWebGL(); }
+    catch (webglError) { context = null; detail.textContent = `GPU setup failed; using CPU fallback: ${webglError.message}`; }
+  }
+}
+
+function rebuildSelectedVolume() {
+  const selected = new Set([...neuronSelect.querySelectorAll('input:checked')].map(input => Number(input.value)));
+  state.volume = new Float32Array(state.labels.length);
+  for (let index = 0; index < state.labels.length; index++) state.volume[index] = selected.has(state.labels[index]) ? 1 : 0;
+  detail.textContent = `Selected ${selected.size} neuron${selected.size === 1 ? '' : 's'}; using grayscale maximum intensity.`;
+}
+
+async function rerenderSelection() {
+  rebuildSelectedVolume();
+  gpu = null; context = null;
+  await setupGpu();
+  const selectedCount = neuronSelect.querySelectorAll('input:checked').length;
+  if (gpu) detail.textContent = `Selected ${selectedCount} neuron${selectedCount === 1 ? '' : 's'}; grayscale maximum intensity on the GPU.`;
+  draw();
+}
+
+async function load() {
+  const [cachedVolume, idsResponse] = await Promise.all([fetch(volumeUrl), fetch(idsUrl)]);
+  if (cachedVolume.ok && idsResponse.ok) {
+    state.labels = new Uint8Array(await cachedVolume.arrayBuffer());
+    const metadata = await idsResponse.json();
+    state.neuronIds = metadata.ids;
+    neuronSelect.replaceChildren(...state.neuronIds.map((id, index) => { const label = document.createElement('label'); const input = document.createElement('input'); input.type = 'checkbox'; input.value = String(index + 1); input.checked = index === 0; label.append(input, document.createTextNode(String(id))); return label; }));
+    rebuildSelectedVolume();
+    gpu = null; context = null;
+    await setupGpu();
+    if (!gpu && !context && !detail.textContent.includes('GPU setup failed')) detail.textContent = 'Loaded neuron labels.';
+    status.textContent = 'FAFB ready'; draw(); return;
+  }
+  const manifest = await fetch(manifestUrl).then(response => response.json()), records = manifest.lods.at(-1), n = state.samples, coordinates = Array.from({length: n}, (_, i) => i * (1200 / (n - 1))), sum = new Float32Array(n ** 3), count = new Uint16Array(n ** 3);
+  if (n === 160) {
+    const cached = await fetch('adaptive_fam_volume_160.raw');
+    if (cached.ok) {
+      state.volume = new Float32Array(await cached.arrayBuffer());
+      gpu = null; context = null;
+      try { await setupWebGPU(); } catch (error) { detail.textContent = `WebGPU setup failed; using CPU fallback: ${error.message}`; }
+      if (!gpu && !detail.textContent.includes('WebGPU')) detail.textContent = 'Loaded the predecoded 160^3 volume cache.';
+      status.textContent = 'Ready'; draw(); return;
+    }
+  }
+  const batchSize = 128;
+  for (let start = 0; start < records.length; start += batchSize) {
+    const batch = records.slice(start, start + batchSize);
+    const decoded = await Promise.all(batch.map(async record => {
+      const selections = [0, 1, 2].map(dimension => coordinates.map((value, i) => value >= record.origin[dimension] && value <= record.origin[dimension] + 75 ? i : -1).filter(i => i >= 0));
+      if (selections.some(selection => !selection.length)) return null;
+      const local = selections.map((selection, dimension) => selection.map(i => (coordinates[i] - record.origin[dimension]) / 75));
+      return { selections, block: await decodeModel(`adaptive_fam_models/chameleon_paper_faithful/renderer_models/${record.global_index}.mfab`, local) };
+    }));
+    for (const result of decoded) if (result) {
+      let position = 0;
+      for (const z of result.selections[0]) for (const y of result.selections[1]) for (const x of result.selections[2]) { const index = (z * n + y) * n + x; sum[index] += result.block[position++]; count[index]++; }
+    }
+    status.textContent = `Loading ${Math.min(start + batch.length, records.length)}/${records.length}`;
+  }
+  state.volume = sum.map((value, index) => value / Math.max(1, count[index]));
+  gpu = null; context = null;
+  await setupGpu();
+  if (!gpu && !context && !detail.textContent.includes('GPU setup failed')) detail.textContent = `Loaded ${records.length} finest-level MFA blocks.`;
+  status.textContent = 'Ready'; draw();
+}
+
+document.querySelectorAll('[data-axis]').forEach(button => button.onclick = () => { state.axis = Number(button.dataset.axis); state.yaw = [0, Math.PI / 2, Math.PI][state.axis]; state.pitch = 0; document.querySelectorAll('[data-axis]').forEach(item => item.setAttribute('aria-pressed', item === button)); draw(); });
+document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll('[data-mode]').forEach(item => item.setAttribute('aria-pressed', item === button)); draw(); });
+document.querySelector('#opacity').oninput = event => { state.opacity = Number(event.target.value); document.querySelector('#opacityValue').value = state.opacity.toFixed(1); draw(); };
+neuronSelect.onchange = () => rerenderSelection();
+document.querySelector('#samples').onchange = event => { state.samples = Number(event.target.value); document.querySelector('#samplesValue').value = state.samples; load(); };
+canvas.onpointerdown = event => { state.dragging = true; state.pointerX = event.clientX; state.pointerY = event.clientY; canvas.setPointerCapture(event.pointerId); };
+canvas.onpointermove = event => { if (!state.dragging) return; state.yaw += (event.clientX - state.pointerX) * 0.01; state.pitch = Math.max(-1.4, Math.min(1.4, state.pitch + (event.clientY - state.pointerY) * 0.01)); state.pointerX = event.clientX; state.pointerY = event.clientY; draw(); };
+canvas.onpointerup = event => { state.dragging = false; canvas.releasePointerCapture(event.pointerId); };
+canvas.onwheel = event => { event.preventDefault(); state.distance = Math.max(1.4, Math.min(5, state.distance + event.deltaY * 0.002)); draw(); };
+load().catch(error => { status.textContent = 'Load failed'; detail.textContent = error.message; });
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

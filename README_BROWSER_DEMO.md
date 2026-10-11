@@ -1,0 +1,173 @@
+# FAFB Browser Demo
+
+This guide starts from the FAFB project directory and ends with a GPU-backed browser demo that can be shared with a supervisor.
+
+## 1. Requirements
+
+- Linux, macOS, or Windows
+- Python 3.10+
+- A modern browser with WebGL2 (Chrome, Edge, or Firefox)
+- The FAFB project checkout
+
+WebGPU is optional. The viewer tries WebGPU first and falls back to WebGL2. WebGL2 is enough for this demo.
+
+## 2. Enter the project
+
+```bash
+cd /path/to/FAFB_project
+```
+
+Confirm the main files exist:
+
+```bash
+ls adaptive_fam_browser.html fafb_neuron_labels_160.raw fafb_neuron_ids.json
+```
+
+The included demo assets are:
+
+- `adaptive_fam_browser.html`: browser viewer
+- `fafb_neuron_labels_160.raw`: 160 x 160 x 160 uint8 label volume
+- `fafb_neuron_ids.json`: neuron IDs mapped to label values
+
+## 3. Run locally
+
+Serve the files over HTTP. Do not open the HTML with `file://`; browsers block binary fetches from local files.
+
+For the isolated share bundle:
+
+```bash
+python -m http.server 8001 --directory demo-share
+```
+
+For the project root:
+
+```bash
+python -m http.server 8001
+```
+
+Open this address:
+
+```text
+http://localhost:8001/adaptive_fam_browser.html
+```
+
+A successful load shows `WebGL2 active; loaded 4,096,000 samples on the GPU.` If WebGPU is available, it will be used instead.
+
+## 4. Use the viewer
+
+- **View axis**: change the viewing direction.
+- **Depth composite**: preserves depth ordering and is the recommended mode for inspecting neuron shape.
+- **Maximum intensity**: shows the brightest selected label along each ray.
+- **Neuron IDs**: click checkboxes to select one or several neurons. No Ctrl/Cmd key is required.
+- **Opacity**: adjusts depth-composite opacity.
+- **Samples**: changes the browser volume resolution and reloads the source volume.
+- **Mouse drag**: orbit the volume.
+- **Mouse wheel**: zoom.
+
+The initial selected neuron is the first ID in `fafb_neuron_ids.json`.
+
+## 5. Share temporarily online
+
+Keep the local HTTP server running. In a second terminal, run:
+
+```bash
+npx --yes localtunnel --port 8001
+```
+
+Localtunnel prints a public URL such as:
+
+```text
+https://example-name.loca.lt
+```
+
+Send your supervisor the URL with the page path:
+
+```text
+https://example-name.loca.lt/adaptive_fam_browser.html
+```
+
+The URL is temporary. The local server and tunnel terminals must remain open. Restarting the tunnel normally creates a new URL.
+
+The recommended command uses `demo-share`, which exposes only the viewer and its required assets rather than the whole research repository.
+
+## 6. Permanent hosting
+
+For a stable URL, publish the contents of `demo-share/` with a static host such as GitHub Pages, Netlify, or a university web server.
+
+The published directory must contain these files at the same level:
+
+```text
+adaptive_fam_browser.html
+fafb_neuron_labels_160.raw
+fafb_neuron_ids.json
+```
+
+Then open:
+
+```text
+https://your-host.example/adaptive_fam_browser.html
+```
+
+Do not rename the raw or JSON files unless you also update `volumeUrl` and `idsUrl` in the HTML.
+
+## 7. Build the label assets again
+
+If the FAFB source labels change, regenerate the compact browser assets from `fafb_multires/mip5/segments.npy`:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+import numpy as np
+
+segments = np.load("fafb_multires/mip5/segments.npy", mmap_mode="r")
+values, counts = np.unique(segments, return_counts=True)
+ranked = sorted(
+    [(int(count), int(value)) for value, count in zip(values, counts) if value != 0],
+    reverse=True,
+)[:20]
+ids = [value for _, value in ranked]
+axes = [np.rint(np.linspace(0, size - 1, 160)).astype(np.int64) for size in segments.shape]
+sampled = segments[np.ix_(*axes)]
+labels = np.zeros(sampled.shape, dtype=np.uint8)
+flat = sampled.reshape(-1)
+out = labels.reshape(-1)
+for index, neuron_id in enumerate(ids, 1):
+    out[flat == neuron_id] = index
+labels.tofile("fafb_neuron_labels_160.raw")
+Path("fafb_neuron_ids.json").write_text(
+    json.dumps({"ids": ids, "counts": [count for count, _ in ranked]}, indent=2)
+)
+PY
+
+cp adaptive_fam_browser.html fafb_neuron_labels_160.raw fafb_neuron_ids.json demo-share/
+```
+
+This uses nearest-neighbor sampling to create a compact 160^3 label volume. It is intended for an interactive demo, not quantitative analysis.
+
+## 8. Troubleshooting
+
+### `WebGPU setup failed`
+
+This is not fatal. The viewer should continue with WebGL2. Confirm the status says `WebGL2 active`.
+
+### `No WebGL2 context`
+
+Use a current Chrome, Edge, or Firefox and enable hardware acceleration. Remote desktop sessions and virtual browsers may disable GPU contexts.
+
+### A rectangular gray artifact appears
+
+Reload the page after confirming you are using the latest `adaptive_fam_browser.html`. The WebGL2 shader discards rays that miss the volume; older copies may show clamped texture edges as a rectangle.
+
+### The supervisor sees a blank page
+
+Confirm the server is running, use the full `/adaptive_fam_browser.html` path, and verify that the raw and JSON files are hosted beside the HTML file.
+
+### The public tunnel stops working
+
+The localtunnel process or local HTTP server has stopped. Restart both commands and send the new URL.
+
+## 9. Scientific limitation
+
+The browser demo uses a compact 160^3 nearest-neighbor label volume and GPU ray marching. It is appropriate for visual demonstration and neuron selection. Use the original FAFB data and project reconstruction pipeline for measurements or publication figures.
