@@ -25,6 +25,7 @@
     #neurons { max-height: 190px; overflow-y: auto; padding: 6px; border: 1px solid var(--line); border-radius: 4px; background: #142923; }
     #neurons label { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--ink); font: 12px monospace; letter-spacing: 0; text-transform: none; cursor: pointer; }
     #neurons input { width: auto; margin: 0; }
+    #samples { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: #142923; color: var(--ink); }
     output { color: var(--accent); float: right; }
     #status { font-family: monospace; font-size: 12px; color: var(--muted); word-break: break-word; }
     @media (max-width: 760px) { main { padding: 16px; } .layout { grid-template-columns: 1fr; } .stage { min-height: auto; } canvas { width: 92vw; height: 92vw; } }
@@ -47,8 +48,13 @@
       <div id="neurons" aria-label="Neuron IDs"></div>
       <label for="opacity">Opacity <output id="opacityValue">1.0</output></label>
       <input id="opacity" type="range" min="0.1" max="3" step="0.1" value="1">
-      <label for="samples">Samples <output id="samplesValue">160</output></label>
-      <input id="samples" type="range" min="64" max="256" step="32" value="160">
+      <label for="samples">Initial volume dimension</label>
+      <select id="samples" aria-label="Initial volume dimension">
+        <option value="160" selected>160 x 160 x 160</option>
+        <option value="192">192 x 192 x 192</option>
+        <option value="224">224 x 224 x 224</option>
+        <option value="256">256 x 256 x 256</option>
+      </select>
       <p id="statusDetail">Preparing neuron IDs for GPU rendering.</p>
     </aside>
   </section>
@@ -341,7 +347,7 @@ document.querySelectorAll('[data-axis]').forEach(button => button.onclick = () =
 document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll('[data-mode]').forEach(item => item.setAttribute('aria-pressed', item === button)); draw(); });
 document.querySelector('#opacity').oninput = event => { state.opacity = Number(event.target.value); document.querySelector('#opacityValue').value = state.opacity.toFixed(1); draw(); };
 neuronSelect.onchange = () => rerenderSelection();
-document.querySelector('#samples').onchange = event => { state.samples = Number(event.target.value); document.querySelector('#samplesValue').value = state.samples; if (state.rawLabels) { state.labels = resampleLabels(state.samples); rerenderSelection(); } else load(); };
+document.querySelector('#samples').onchange = event => { state.samples = Number(event.target.value); if (state.rawLabels) { state.labels = resampleLabels(state.samples); rerenderSelection(); } else load(); };
 canvas.onpointerdown = event => { state.dragging = true; state.pointerX = event.clientX; state.pointerY = event.clientY; canvas.setPointerCapture(event.pointerId); };
 canvas.onpointermove = event => { if (!state.dragging) return; state.yaw += (event.clientX - state.pointerX) * 0.01; state.pitch = Math.max(-1.4, Math.min(1.4, state.pitch + (event.clientY - state.pointerY) * 0.01)); state.pointerX = event.clientX; state.pointerY = event.clientY; draw(); };
 canvas.onpointerup = event => { state.dragging = false; canvas.releasePointerCapture(event.pointerId); };
