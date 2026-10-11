@@ -61,8 +61,9 @@
 </main>
 <script>
 const manifestUrl = 'adaptive_fam_models/chameleon_paper_faithful/manifest.json';
-const volumeUrl = 'fafb_neuron_labels_160.raw';
+const volumeUrl = 'fafb_neuron_labels_source.raw';
 const idsUrl = 'fafb_neuron_ids.json';
+const sourceShape = [128, 128, 257];
 const state = { volume: null, rawLabels: null, labels: null, neuronIds: [], samples: 160, axis: 0, mode: 'depth', opacity: 1, yaw: 0, pitch: 0, distance: 2.4, dragging: false, pointerX: 0, pointerY: 0 };
 window.__adaptiveFamState = state;
 const status = document.querySelector('#status');
@@ -138,12 +139,12 @@ function draw() {
 }
 
 function resampleLabels(targetSize) {
-  const sourceSize = 160, output = new Uint8Array(targetSize ** 3);
+  const output = new Uint8Array(targetSize ** 3);
   for (let z = 0; z < targetSize; z++) for (let y = 0; y < targetSize; y++) for (let x = 0; x < targetSize; x++) {
-    const sourceZ = Math.min(sourceSize - 1, Math.round(z * (sourceSize - 1) / (targetSize - 1)));
-    const sourceY = Math.min(sourceSize - 1, Math.round(y * (sourceSize - 1) / (targetSize - 1)));
-    const sourceX = Math.min(sourceSize - 1, Math.round(x * (sourceSize - 1) / (targetSize - 1)));
-    output[(z * targetSize + y) * targetSize + x] = state.rawLabels[(sourceZ * sourceSize + sourceY) * sourceSize + sourceX];
+    const sourceZ = Math.min(sourceShape[0] - 1, Math.round(z * (sourceShape[0] - 1) / (targetSize - 1)));
+    const sourceY = Math.min(sourceShape[1] - 1, Math.round(y * (sourceShape[1] - 1) / (targetSize - 1)));
+    const sourceX = Math.min(sourceShape[2] - 1, Math.round(x * (sourceShape[2] - 1) / (targetSize - 1)));
+    output[(z * targetSize + y) * targetSize + x] = state.rawLabels[(sourceZ * sourceShape[1] + sourceY) * sourceShape[2] + sourceX];
   }
   return output;
 }
