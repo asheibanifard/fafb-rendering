@@ -34,7 +34,7 @@
 <main>
   <header><div><h1>FAFB neurons</h1><p>Multi-select grayscale maximum-intensity rendering</p></div><div id="status">Loading neurons...</div></header>
   <section class="layout">
-    <div class="stage"><canvas id="view" width="160" height="160"></canvas><div id="fps">FPS: --</div></div>
+    <div class="stage"><canvas id="view" width="160" height="160"></canvas><div id="fps">Render FPS: --<br>GPU FPS: --</div></div>
     <aside>
       <label>View axis</label>
       <button data-axis="0" aria-pressed="true">Z axis</button>
@@ -66,6 +66,9 @@ const neuronSelect = document.querySelector('#neurons');
 const fpsElement = document.querySelector('#fps');
 let context = null;
 let gpu = null;
+let gpuTimerExtension = null;
+let gpuTimerQuery = null;
+let gpuElapsedMilliseconds = null;
 let frameCount = 0;
 let fpsTimestamp = performance.now();
 
@@ -133,7 +136,9 @@ function animate(timestamp) {
     draw();
     frameCount++;
     if (timestamp - fpsTimestamp >= 500) {
-      fpsElement.textContent = `FPS: ${(frameCount * 1000 / (timestamp - fpsTimestamp)).toFixed(1)}`;
+      const renderFps = (frameCount * 1000 / (timestamp - fpsTimestamp)).toFixed(1);
+      const gpuFps = gpuElapsedMilliseconds ? (1000 / gpuElapsedMilliseconds).toFixed(1) : '--';
+      fpsElement.innerHTML = `Render FPS: ${renderFps}<br>GPU FPS: ${gpuFps}`;
       frameCount = 0;
       fpsTimestamp = timestamp;
     }
@@ -203,6 +208,7 @@ async function setupWebGPU() {
 function setupWebGL() {
   const gl = canvas.getContext('webgl2');
   if (!gl) throw new Error('WebGL2 is unavailable.');
+  gpuTimerExtension = gl.getExtension('EXT_disjoint_timer_query_webgl2');
   const vertexSource = `#version 300 es
     void main() {
       vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
@@ -245,7 +251,7 @@ function setupWebGL() {
   const bytes = new Uint8Array(state.volume.length); for (let i = 0; i < bytes.length; i++) bytes[i] = Math.max(0, Math.min(255, state.volume[i] * 255));
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, 160, 160, 160, 0, gl.RED, gl.UNSIGNED_BYTE, bytes); gl.useProgram(program); gl.uniform1i(gl.getUniformLocation(program, 'volume'), 0);
   context = gl;
-  gpu = { render() { gl.viewport(0, 0, canvas.width, canvas.height); gl.useProgram(program); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), state.yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), state.pitch); gl.uniform1f(gl.getUniformLocation(program, 'opacity'), state.opacity); gl.uniform1f(gl.getUniformLocation(program, 'distance'), state.distance); gl.uniform1f(gl.getUniformLocation(program, 'mode'), state.mode === 'max' ? 1 : 0); gl.drawArrays(gl.TRIANGLES, 0, 3); } };
+  gpu = { render() { gl.viewport(0, 0, canvas.width, canvas.height); gl.useProgram(program); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), state.yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), state.pitch); gl.uniform1f(gl.getUniformLocation(program, 'opacity'), state.opacity); gl.uniform1f(gl.getUniformLocation(program, 'distance'), state.distance); gl.uniform1f(gl.getUniformLocation(program, 'mode'), state.mode === 'max' ? 1 : 0); if (gpuTimerExtension && gpuTimerQuery && gl.getQuery(gpuTimerQuery, gl.QUERY_RESULT_AVAILABLE)) { if (!gl.getParameter(gpuTimerExtension.GPU_DISJOINT_EXT)) gpuElapsedMilliseconds = gl.getQuery(gpuTimerQuery, gl.QUERY_RESULT) / 1000000; gl.deleteQuery(gpuTimerQuery); gpuTimerQuery = null; } let activeQuery = null; if (gpuTimerExtension && !gpuTimerQuery) { activeQuery = gl.createQuery(); gpuTimerQuery = activeQuery; gl.beginQuery(gpuTimerExtension.TIME_ELAPSED_EXT, activeQuery); } gl.drawArrays(gl.TRIANGLES, 0, 3); if (activeQuery) gl.endQuery(gpuTimerExtension.TIME_ELAPSED_EXT); } };
   detail.textContent = `WebGL2 active; loaded ${state.volume.length.toLocaleString()} samples on the GPU.`;
 }
 
