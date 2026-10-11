@@ -66,7 +66,23 @@ A successful load shows `WebGL2 active; loaded 4,096,000 samples on the GPU.` If
 
 The initial selected neuron is the first ID in `fafb_neuron_ids.json`.
 
-## 5. Share temporarily online
+## 5. Run the real Adaptive-FAM `.mfab` demo
+
+The separate MFA demo fetches and decodes an actual FAFB `.mfab` file in JavaScript:
+
+```bash
+python -m http.server 8001
+```
+
+Open:
+
+```text
+http://localhost:8001/mfab_demo.html
+```
+
+This demo uses `fafb_demo_block_3.mfab`, evaluates its degree-2 MFA spline, reconstructs a 48^3 volume, and renders the result with WebGL2. It is a single-block proof of concept; the full FAFB `.mfab` renderer set is not yet complete.
+
+## 6. Share temporarily online
 
 Keep the local HTTP server running. In a second terminal, run:
 
@@ -90,7 +106,7 @@ The URL is temporary. The local server and tunnel terminals must remain open. Re
 
 The recommended command uses `demo-share`, which exposes only the viewer and its required assets rather than the whole research repository.
 
-## 6. Permanent hosting
+## 7. Permanent hosting
 
 For a stable URL, publish the contents of `demo-share/` with a static host such as GitHub Pages, Netlify, or a university web server.
 
@@ -110,7 +126,7 @@ https://your-host.example/adaptive_fam_browser.html
 
 Do not rename the raw or JSON files unless you also update `volumeUrl` and `idsUrl` in the HTML.
 
-## 7. Build the label assets again
+## 8. Build the label assets again
 
 If the FAFB source labels change, regenerate the compact browser assets from `fafb_multires/mip5/segments.npy`:
 
@@ -146,7 +162,7 @@ cp adaptive_fam_browser.html fafb_neuron_labels_160.raw fafb_neuron_ids.json dem
 
 This uses nearest-neighbor sampling to create a compact 160^3 label volume. It is intended for an interactive demo, not quantitative analysis.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 ### `WebGPU setup failed`
 
@@ -168,6 +184,6 @@ Confirm the server is running, use the full `/adaptive_fam_browser.html` path, a
 
 The localtunnel process or local HTTP server has stopped. Restart both commands and send the new URL.
 
-## 9. Scientific limitation
+## 10. Scientific limitation
 
 The browser demo uses a compact 160^3 nearest-neighbor label volume and GPU ray marching. It is appropriate for visual demonstration and neuron selection. Use the original FAFB data and project reconstruction pipeline for measurements or publication figures.

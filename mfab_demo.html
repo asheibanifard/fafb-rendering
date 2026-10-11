@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAFB Adaptive-FAM MFA Demo</title>
+  <style>
+    :root { color-scheme: dark; --ink: #e9f2ee; --muted: #91aaa0; --panel: #10201d; --line: #29423a; --accent: #64e6a5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 70% 10%, #1b3930, #08110f 58%); color: var(--ink); font: 15px/1.45 Georgia, serif; }
+    main { width: min(1000px, 100%); margin: auto; padding: 28px; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); font-weight: 400; }
+    p { color: var(--muted); }
+    .stage { position: relative; display: grid; place-items: center; min-height: 620px; border: 1px solid var(--line); border-radius: 8px; background: #10201dee; }
+    canvas { width: min(78vw, 640px); height: min(78vw, 640px); background: #000; border-radius: 4px; }
+    #status { position: fixed; top: 12px; right: 12px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--accent); background: #08110fcc; font: 12px monospace; }
+    #info { font: 12px monospace; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>FAFB Adaptive-FAM MFA</h1>
+  <p>This page fetches one real <code>.mfab</code> model, decodes its MFA spline, reconstructs a volume, and renders it on WebGL2.</p>
+  <div class="stage"><canvas id="view" width="160" height="160"></canvas></div>
+  <p id="info">Loading MFA model...</p>
+</main>
+<div id="status">Render FPS: --</div>
+<script>
+const canvas = document.querySelector('#view');
+const info = document.querySelector('#info');
+const status = document.querySelector('#status');
+const size = 48;
+let yaw = 0, pitch = 0, distance = 2.4, dragging = false, px = 0, py = 0;
+
+function basis(parameter, knots, degree) {
+  const ncp = knots.length - degree - 1, values = new Float32Array(ncp);
+  for (let index = 0; index < ncp; index++) values[index] = parameter >= knots[index] && parameter < knots[index + 1] ? 1 : 0;
+  if (parameter === knots[knots.length - 1]) values[ncp - 1] = 1;
+  for (let order = 1; order <= degree; order++) {
+    const next = new Float32Array(ncp);
+    for (let index = 0; index < ncp; index++) {
+      const left = knots[index + order] - knots[index];
+      const right = knots[index + order + 1] - knots[index + 1];
+      if (left) next[index] += (parameter - knots[index]) / left * values[index];
+      if (right && index + 1 < ncp) next[index] += (knots[index + order + 1] - parameter) / right * values[index + 1];
+    }
+    values.set(next);
+  }
+  return values;
+}
+
+async function decodeMfab(url) {
+  const buffer = await fetch(url).then(response => response.arrayBuffer());
+  const data = new DataView(buffer), degree = data.getUint32(0, true), knotSize = data.getUint32(4, true);
+  const knots = [0, 1, 2].map(axis => Array.from({length: knotSize}, (_, index) => data.getFloat32(8 + (axis * knotSize + index) * 4, true)));
+  const ncp = knotSize - degree - 1, controls = new Float32Array(buffer, 8 + knotSize * 3 * 4, ncp ** 3);
+  const volume = new Float32Array(size ** 3);
+  let maximum = 0;
+  for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const bz = basis(z / (size - 1), knots[0], degree), by = basis(y / (size - 1), knots[1], degree), bx = basis(x / (size - 1), knots[2], degree);
+    let value = 0;
+    for (let a = 0; a < ncp; a++) for (let b = 0; b < ncp; b++) for (let c = 0; c < ncp; c++) value += bz[a] * by[b] * bx[c] * controls[(a * ncp + b) * ncp + c];
+    const index = (z * size + y) * size + x;
+    volume[index] = value;
+    maximum = Math.max(maximum, value);
+  }
+  for (let index = 0; index < volume.length; index++) volume[index] = Math.max(0, Math.min(1, volume[index] / maximum));
+  return { degree, ncp, volume };
+}
+
+function render(volume) {
+  const gl = canvas.getContext('webgl2');
+  if (!gl) throw new Error('WebGL2 is unavailable.');
+  const vertex = `#version 300 es
+    void main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); }`;
+  const fragment = `#version 300 es
+    precision highp float; precision highp sampler3D;
+    uniform sampler3D volume; uniform float yaw, pitch, distance;
+    out vec4 outputColor;
+    void main() {
+      vec2 uv = gl_FragCoord.xy / vec2(${canvas.width}.0, ${canvas.height}.0);
+      vec3 camera = vec3(distance * cos(pitch) * sin(yaw), distance * sin(pitch), distance * cos(pitch) * cos(yaw));
+      vec3 forward = normalize(vec3(.5) - camera), right = normalize(cross(forward, vec3(0,1,0))), up = cross(right, forward);
+      vec3 direction = normalize(forward + right * (uv.x - .5) * 1.4 + up * (uv.y - .5) * 1.4), inverseDirection = 1. / direction;
+      vec3 nearPoint = min((vec3(0) - camera) * inverseDirection, (vec3(1) - camera) * inverseDirection);
+      vec3 farPoint = max((vec3(0) - camera) * inverseDirection, (vec3(1) - camera) * inverseDirection);
+      float nearDistance = max(max(nearPoint.x, nearPoint.y), nearPoint.z), farDistance = min(min(farPoint.x, farPoint.y), farPoint.z);
+      if (farDistance <= nearDistance) { outputColor = vec4(0); return; }
+      float maximum = 0.;
+      for (int index = 0; index < 128; index++) { float t = nearDistance + (float(index) + .5) / 128. * (farDistance - nearDistance); maximum = max(maximum, texture(volume, camera + direction * t).r); }
+      outputColor = vec4(vec3(maximum), 1.);
+    }`;
+  const compile = (type, source) => { const shader = gl.createShader(type); gl.shaderSource(shader, source); gl.compileShader(shader); if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader)); return shader; };
+  const program = gl.createProgram(); gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex)); gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment)); gl.linkProgram(program);
+  const texture = gl.createTexture(); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, texture); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  const bytes = new Uint8Array(volume.length); for (let index = 0; index < bytes.length; index++) bytes[index] = volume[index] * 255;
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, size, size, size, 0, gl.RED, gl.UNSIGNED_BYTE, bytes); gl.useProgram(program); gl.uniform1i(gl.getUniformLocation(program, 'volume'), 0);
+  const draw = () => { gl.viewport(0, 0, canvas.width, canvas.height); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), pitch); gl.uniform1f(gl.getUniformLocation(program, 'distance'), distance); gl.drawArrays(gl.TRIANGLES, 0, 3); requestAnimationFrame(draw); };
+  draw();
+}
+
+canvas.onpointerdown = event => { dragging = true; px = event.clientX; py = event.clientY; canvas.setPointerCapture(event.pointerId); };
+canvas.onpointermove = event => { if (!dragging) return; yaw += (event.clientX - px) * .01; pitch = Math.max(-1.4, Math.min(1.4, pitch + (event.clientY - py) * .01)); px = event.clientX; py = event.clientY; };
+canvas.onpointerup = event => { dragging = false; canvas.releasePointerCapture(event.pointerId); };
+canvas.onwheel = event => { event.preventDefault(); distance = Math.max(1.4, Math.min(5, distance + event.deltaY * .002)); };
+
+decodeMfab('fafb_demo_block_3.mfab').then(model => { info.textContent = `Decoded real MFA model: degree ${model.degree}, NCP ${model.ncp}, reconstructed ${size}^3 volume.`; render(model.volume); status.textContent = 'WebGL2 MFA render'; }).catch(error => { info.textContent = `MFA demo failed: ${error.message}`; });
+</script>
+</body>
+</html>
