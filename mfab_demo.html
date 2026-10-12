@@ -15,12 +15,23 @@
     canvas { width: min(78vw, 640px); height: min(78vw, 640px); background: #000; border-radius: 4px; }
     #status { position: fixed; top: 12px; right: 12px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--accent); background: #08110fcc; font: 12px monospace; }
     #info { font: 12px monospace; color: var(--muted); }
+    #neurons { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 4px 12px; max-height: 150px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: #10201dee; }
+    #neurons label { color: var(--ink); font: 12px monospace; cursor: pointer; }
+    #modes { display: flex; gap: 8px; margin: 12px 0; }
+    #modes button { padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); cursor: pointer; }
+    #modes button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   </style>
 </head>
 <body>
 <main>
   <h1>FAFB Adaptive-FAM MFA</h1>
   <p>This page fetches one real <code>.mfab</code> model, decodes its MFA spline, reconstructs a volume, and renders it on WebGL2.</p>
+  <p>Select neuron segments to mask the reconstructed MFA intensity volume:</p>
+  <div id="neurons" aria-label="Neuron segment IDs">Loading neuron IDs...</div>
+  <div id="modes" aria-label="Render mode">
+    <button data-mode="depth" aria-pressed="true">Depth composite</button>
+    <button data-mode="max" aria-pressed="false">Maximum intensity</button>
+  </div>
   <div class="stage"><canvas id="view" width="160" height="160"></canvas></div>
   <p id="info">Loading MFA model...</p>
 </main>
@@ -29,8 +40,11 @@
 const canvas = document.querySelector('#view');
 const info = document.querySelector('#info');
 const status = document.querySelector('#status');
-const size = 48;
-let yaw = 0, pitch = 0, distance = 2.4, dragging = false, px = 0, py = 0;
+const neuronList = document.querySelector('#neurons');
+const size = 32;
+const labelSize = 160;
+let yaw = 0, pitch = 0, distance = 2.4, dragging = false, px = 0, py = 0, animationFrame = null;
+let renderMode = 'depth', currentVolume = null;
 
 function basis(parameter, knots, degree) {
   const ncp = knots.length - degree - 1, values = new Float32Array(ncp);
@@ -68,14 +82,28 @@ async function decodeMfab(url) {
   return { degree, ncp, volume };
 }
 
+function maskVolume(volume, labels, selectedLabels) {
+  const masked = new Float32Array(volume.length);
+  for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const sourceZ = Math.min(labelSize - 1, Math.floor(z * labelSize / size));
+    const sourceY = Math.min(labelSize - 1, Math.floor(y * labelSize / size));
+    const sourceX = Math.min(labelSize - 1, Math.floor(x * labelSize / size));
+    const sourceIndex = (sourceZ * labelSize + sourceY) * labelSize + sourceX;
+    const index = (z * size + y) * size + x;
+    masked[index] = selectedLabels.has(labels[sourceIndex]) ? volume[index] : 0;
+  }
+  return masked;
+}
+
 function render(volume) {
+  if (animationFrame) cancelAnimationFrame(animationFrame);
   const gl = canvas.getContext('webgl2');
   if (!gl) throw new Error('WebGL2 is unavailable.');
   const vertex = `#version 300 es
     void main() { vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0); gl_Position = vec4(p, 0.0, 1.0); }`;
   const fragment = `#version 300 es
     precision highp float; precision highp sampler3D;
-    uniform sampler3D volume; uniform float yaw, pitch, distance;
+    uniform sampler3D volume; uniform float yaw, pitch, distance, mode;
     out vec4 outputColor;
     void main() {
       vec2 uv = gl_FragCoord.xy / vec2(${canvas.width}.0, ${canvas.height}.0);
@@ -86,16 +114,16 @@ function render(volume) {
       vec3 farPoint = max((vec3(0) - camera) * inverseDirection, (vec3(1) - camera) * inverseDirection);
       float nearDistance = max(max(nearPoint.x, nearPoint.y), nearPoint.z), farDistance = min(min(farPoint.x, farPoint.y), farPoint.z);
       if (farDistance <= nearDistance) { outputColor = vec4(0); return; }
-      float maximum = 0.;
-      for (int index = 0; index < 128; index++) { float t = nearDistance + (float(index) + .5) / 128. * (farDistance - nearDistance); maximum = max(maximum, texture(volume, camera + direction * t).r); }
-      outputColor = vec4(vec3(maximum), 1.);
+      float maximum = 0.; float accumulatedOpacity = 0.; vec3 accumulated = vec3(0.);
+      for (int index = 0; index < 128; index++) { float t = nearDistance + (float(index) + .5) / 128. * (farDistance - nearDistance); float value = smoothstep(.54, .62, texture(volume, camera + direction * t).r); maximum = max(maximum, value); float alpha = value * .25; accumulated += (1. - accumulatedOpacity) * alpha * vec3(value); accumulatedOpacity += (1. - accumulatedOpacity) * alpha; }
+      outputColor = vec4(mode > .5 ? vec3(maximum) : accumulated, 1.);
     }`;
   const compile = (type, source) => { const shader = gl.createShader(type); gl.shaderSource(shader, source); gl.compileShader(shader); if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader)); return shader; };
   const program = gl.createProgram(); gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex)); gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment)); gl.linkProgram(program);
   const texture = gl.createTexture(); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, texture); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
   const bytes = new Uint8Array(volume.length); for (let index = 0; index < bytes.length; index++) bytes[index] = volume[index] * 255;
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, size, size, size, 0, gl.RED, gl.UNSIGNED_BYTE, bytes); gl.useProgram(program); gl.uniform1i(gl.getUniformLocation(program, 'volume'), 0);
-  const draw = () => { gl.viewport(0, 0, canvas.width, canvas.height); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), pitch); gl.uniform1f(gl.getUniformLocation(program, 'distance'), distance); gl.drawArrays(gl.TRIANGLES, 0, 3); requestAnimationFrame(draw); };
+  const draw = () => { gl.viewport(0, 0, canvas.width, canvas.height); gl.uniform1f(gl.getUniformLocation(program, 'yaw'), yaw); gl.uniform1f(gl.getUniformLocation(program, 'pitch'), pitch); gl.uniform1f(gl.getUniformLocation(program, 'distance'), distance); gl.uniform1f(gl.getUniformLocation(program, 'mode'), renderMode === 'max' ? 1 : 0); gl.drawArrays(gl.TRIANGLES, 0, 3); animationFrame = requestAnimationFrame(draw); };
   draw();
 }
 
@@ -104,7 +132,16 @@ canvas.onpointermove = event => { if (!dragging) return; yaw += (event.clientX -
 canvas.onpointerup = event => { dragging = false; canvas.releasePointerCapture(event.pointerId); };
 canvas.onwheel = event => { event.preventDefault(); distance = Math.max(1.4, Math.min(5, distance + event.deltaY * .002)); };
 
-decodeMfab('fafb_demo_block_3.mfab').then(model => { info.textContent = `Decoded real MFA model: degree ${model.degree}, NCP ${model.ncp}, reconstructed ${size}^3 volume.`; render(model.volume); status.textContent = 'WebGL2 MFA render'; }).catch(error => { info.textContent = `MFA demo failed: ${error.message}`; });
+Promise.all([decodeMfab('fafb_demo_block_10.mfab'), fetch('fafb_neuron_labels_160.raw').then(response => response.arrayBuffer()), fetch('fafb_neuron_ids.json').then(response => response.json())]).then(([model, labelBuffer, metadata]) => {
+  const labels = new Uint8Array(labelBuffer), selectedLabels = new Set([1]);
+  neuronList.replaceChildren(...metadata.ids.map((id, index) => { const label = document.createElement('label'); const input = document.createElement('input'); input.type = 'checkbox'; input.value = String(index + 1); input.checked = index === 0; input.onchange = () => { selectedLabels.clear(); neuronList.querySelectorAll('input:checked').forEach(item => selectedLabels.add(Number(item.value))); if (!selectedLabels.size) { input.checked = true; selectedLabels.add(Number(input.value)); } currentVolume = maskVolume(model.volume, labels, selectedLabels); render(currentVolume); info.textContent = `Decoded MFA degree ${model.degree}, NCP ${model.ncp}; selected ${selectedLabels.size} neuron segment(s).`; }; label.append(input, document.createTextNode(String(id))); return label; }));
+  info.textContent = `Decoded MFA degree ${model.degree}, NCP ${model.ncp}; selected 1 neuron segment.`;
+  currentVolume = maskVolume(model.volume, labels, selectedLabels);
+  render(currentVolume);
+  status.textContent = 'WebGL2 MFA render';
+}).catch(error => { info.textContent = `MFA demo failed: ${error.message}`; });
+
+document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => { renderMode = button.dataset.mode; document.querySelectorAll('[data-mode]').forEach(item => item.setAttribute('aria-pressed', item === button)); });
 </script>
 </body>
 </html>

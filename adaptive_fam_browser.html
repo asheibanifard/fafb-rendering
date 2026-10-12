@@ -119,19 +119,29 @@ function transfer(value) {
 }
 
 function draw() {
-  if (!state.volume || (!gpu && !context)) return;
+  if (!state.volume) return;
   if (gpu) { gpu.render(); return; }
   if (!context) context = canvas.getContext('2d');
+  if (!context || typeof context.createImageData !== 'function') return;
   const n = state.samples, volume = state.volume, image = context.createImageData(n, n), depthFirst = state.axis;
-  const shape = [n, n, n], rgb = new Float32Array(n * n * 3), opacity = new Float32Array(n * n);
+  const rgb = new Float32Array(n * n * 3), opacity = new Float32Array(n * n);
   for (let depth = 0; depth < n; depth++) for (let row = 0; row < n; row++) for (let col = 0; col < n; col++) {
     const coordinates = [depth, row, col]; coordinates[depthFirst] = depth;
     const index = (coordinates[0] * n + coordinates[1]) * n + coordinates[2], value = Math.max(0, Math.min(1, volume[index])), pixel = row * n + col;
-    if (state.mode === 'max') rgb[pixel * 3] = Math.max(rgb[pixel * 3], value);
-    else rgb[pixel * 3] += (1 - opacity[pixel]) * value * state.opacity;
-    rgb[pixel * 3 + 1] = rgb[pixel * 3];
-    rgb[pixel * 3 + 2] = rgb[pixel * 3];
-    opacity[pixel] = state.mode === 'max' ? rgb[pixel * 3] : Math.min(1, opacity[pixel] + (1 - opacity[pixel]) * value * state.opacity);
+    if (state.mode === 'max') {
+      const intensity = Math.max(rgb[pixel * 3], value);
+      rgb[pixel * 3] = intensity;
+      rgb[pixel * 3 + 1] = intensity;
+      rgb[pixel * 3 + 2] = intensity;
+    } else if (value > 0 && opacity[pixel] < 1) {
+      const alpha = Math.min(value * 0.12 * state.opacity, 0.35);
+      const contribution = (1 - opacity[pixel]) * alpha;
+      const depthValue = depth / Math.max(1, n - 1);
+      rgb[pixel * 3] += contribution * (1 - depthValue);
+      rgb[pixel * 3 + 1] += contribution * (0.25 + 0.75 * depthValue);
+      rgb[pixel * 3 + 2] += contribution * depthValue;
+      opacity[pixel] += contribution;
+    }
   }
   canvas.width = canvas.height = n;
   for (let pixel = 0; pixel < n * n; pixel++) { image.data[pixel * 4] = Math.min(255, rgb[pixel * 3] * 255); image.data[pixel * 4 + 1] = Math.min(255, rgb[pixel * 3 + 1] * 255); image.data[pixel * 4 + 2] = Math.min(255, rgb[pixel * 3 + 2] * 255); image.data[pixel * 4 + 3] = 255; }
@@ -165,10 +175,7 @@ function animate(timestamp) {
 }
 
 async function setupWebGPU() {
-  if (!navigator.gpu) {
-    detail.textContent = 'WebGPU unavailable; using CPU fallback.';
-    return;
-  }
+  if (!navigator.gpu) throw new Error('WebGPU is unavailable.');
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No WebGPU adapter available.');
   const device = await adapter.requestDevice();
@@ -224,7 +231,7 @@ async function setupWebGPU() {
 }
 
 function setupWebGL() {
-  const gl = canvas.getContext('webgl2');
+  const gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
   if (!gl) throw new Error('WebGL2 is unavailable.');
   gpuTimerExtension = gl.getExtension('EXT_disjoint_timer_query_webgl2');
   const vertexSource = `#version 300 es
@@ -277,7 +284,11 @@ async function setupGpu() {
   try { await setupWebGPU(); }
   catch (webgpuError) {
     try { setupWebGL(); }
-    catch (webglError) { context = null; detail.textContent = `GPU setup failed; using CPU fallback: ${webglError.message}`; }
+    catch (webglError) {
+      gpu = null;
+      context = null;
+      detail.textContent = `GPU unavailable (WebGPU: ${webgpuError.message}; WebGL2: ${webglError.message}). Enable browser hardware acceleration and reload.`;
+    }
   }
 }
 
@@ -308,7 +319,7 @@ async function load() {
     rebuildSelectedVolume();
     gpu = null; context = null;
     await setupGpu();
-    if (!gpu && !context && !detail.textContent.includes('GPU setup failed')) detail.textContent = 'Loaded neuron labels.';
+    if (!gpu && !context && !detail.textContent.includes('GPU unavailable')) detail.textContent = 'Loaded neuron labels.';
     status.textContent = 'FAFB ready'; draw(); return;
   }
   const manifest = await fetch(manifestUrl).then(response => response.json()), records = manifest.lods.at(-1), n = state.samples, coordinates = Array.from({length: n}, (_, i) => i * (1200 / (n - 1))), sum = new Float32Array(n ** 3), count = new Uint16Array(n ** 3);
@@ -340,12 +351,19 @@ async function load() {
   state.volume = sum.map((value, index) => value / Math.max(1, count[index]));
   gpu = null; context = null;
   await setupGpu();
-  if (!gpu && !context && !detail.textContent.includes('GPU setup failed')) detail.textContent = `Loaded ${records.length} finest-level MFA blocks.`;
+  if (!gpu && !context && !detail.textContent.includes('GPU unavailable')) detail.textContent = `Loaded ${records.length} finest-level MFA blocks.`;
   status.textContent = 'Ready'; draw();
 }
 
 document.querySelectorAll('[data-axis]').forEach(button => button.onclick = () => { state.axis = Number(button.dataset.axis); state.yaw = [0, Math.PI / 2, Math.PI][state.axis]; state.pitch = 0; document.querySelectorAll('[data-axis]').forEach(item => item.setAttribute('aria-pressed', item === button)); draw(); });
-document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll('[data-mode]').forEach(item => item.setAttribute('aria-pressed', item === button)); draw(); });
+document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => {
+  state.mode = button.dataset.mode;
+  document.querySelectorAll('[data-mode]').forEach(item => item.setAttribute('aria-pressed', item === button));
+  detail.textContent = state.mode === 'max'
+    ? 'Maximum intensity: brightest selected voxel along each ray.'
+    : 'Depth composite: front-to-back accumulation with depth coloring.';
+  draw();
+});
 document.querySelector('#opacity').oninput = event => { state.opacity = Number(event.target.value); document.querySelector('#opacityValue').value = state.opacity.toFixed(1); draw(); };
 neuronSelect.onchange = () => rerenderSelection();
 document.querySelector('#samples').onchange = event => { state.samples = Number(event.target.value); if (state.rawLabels) { state.labels = resampleLabels(state.samples); rerenderSelection(); } else load(); };

@@ -177,6 +177,8 @@ This is not fatal. The viewer should continue with WebGL2. Confirm the status sa
 
 Use a current Chrome, Edge, or Firefox and enable hardware acceleration. Remote desktop sessions and virtual browsers may disable GPU contexts.
 
+The viewer tries WebGPU first and then WebGL2 with a high-performance GPU preference. If both are unavailable, it reports both failures in the status panel and uses the CPU preview. Rotation and render-mode changes are GPU-rendered only when the status reports `WebGPU active` or `WebGL2 active`; a browser automation or remote desktop session without hardware acceleration cannot provide a GPU context.
+
 ### A rectangular gray artifact appears
 
 Reload the page after confirming you are using the latest `adaptive_fam_browser.html`. The WebGL2 shader discards rays that miss the volume; older copies may show clamped texture edges as a rectangle.
